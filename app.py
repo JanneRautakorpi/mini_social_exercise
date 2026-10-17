@@ -333,6 +333,21 @@ def complete_contribution(contribution_id):
     return redirect(url_for('feed'))
 
 
+@app.route('/contributions/<int:contribution_id>/obsolete', methods=['POST'])
+def obsolete_contribution(contribution_id):
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    db = get_db()
+    result = db.execute('''
+        UPDATE contributions SET status = 'obsolete'
+        WHERE id = ? AND creator_id = ? AND status IN ('open', 'in_progress')
+    ''', (contribution_id, user_id))
+    db.commit()
+    flash('Request marked obsolete.' if result.rowcount else 'Only you can obsolete your active request.', 'success' if result.rowcount else 'warning')
+    return redirect(url_for('feed'))
+
+
 @app.route('/contributions/preferences', methods=['POST'])
 def update_contribution_preferences():
     user_id = session.get('user_id')

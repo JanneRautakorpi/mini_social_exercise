@@ -99,6 +99,11 @@
             <button type="submit" class="btn btn-sm btn-success">Mark complete</button>
           </form>
           {% endif %}
+          {% if session.get('user_id') == task.creator_id and task.status in ('open', 'in_progress') %}
+          <form action="{{ url_for('obsolete_contribution', contribution_id=task.id) }}" method="POST" class="mt-2" onsubmit="return confirm('Mark this request obsolete? It will be removed from the work board.');">
+            <button type="submit" class="btn btn-sm btn-outline-danger">Mark obsolete</button>
+          </form>
+          {% endif %}
         </div>
       </div>
     </article>
