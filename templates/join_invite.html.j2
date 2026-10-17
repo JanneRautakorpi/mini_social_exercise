@@ -1,0 +1,18 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="container col-md-7 mx-auto mt-5">
+  <div class="card">
+    <div class="card-body p-4">
+      {% if invitation.accepted_by %}
+      <h1 class="h3">This invitation has already been used</h1>
+      <p class="mb-0">{{ invitation.inviter_username }} invited {{ invitation.recipient_name }} to join Mini Social.</p>
+      {% else %}
+      <p class="text-muted mb-1">A personal invitation from {{ invitation.inviter_username }}</p>
+      <h1 class="h3">{{ invitation.inviter_username }} invited you, {{ invitation.recipient_name }}</h1>
+      <p class="my-4">{{ invitation.message }}</p>
+      <a class="btn btn-primary" href="{{ url_for('signup', invite=invitation.token) }}">Join the community</a>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

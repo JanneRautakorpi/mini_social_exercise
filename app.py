@@ -7,6 +7,7 @@ import json
 import sqlite3
 import hashlib
 import re
+import secrets
 from datetime import datetime
 
 app = Flask(__name__)
@@ -68,6 +69,17 @@ def get_db():
                 FOREIGN KEY (creator_id) REFERENCES users(id),
                 FOREIGN KEY (assigned_to) REFERENCES users(id),
                 FOREIGN KEY (contributor_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS recruitment_invites (
+                token TEXT PRIMARY KEY,
+                inviter_id INTEGER NOT NULL,
+                recipient_name TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                accepted_by INTEGER UNIQUE,
+                accepted_at TIMESTAMP,
+                FOREIGN KEY (inviter_id) REFERENCES users(id),
+                FOREIGN KEY (accepted_by) REFERENCES users(id)
             );
         ''')
 
@@ -588,8 +600,68 @@ def privacy():
     return render_template('privacy.html.j2')
 
 
+@app.route('/invite', methods=['GET', 'POST'])
+def invite_member():
+    inviter_id = session.get('user_id')
+    if not inviter_id:
+        flash('Log in to invite someone to the community.', 'warning')
+        return redirect(url_for('login'))
+
+    generated_url = None
+    if request.method == 'POST':
+        recipient_name = request.form.get('recipient_name', '').strip()
+        message = request.form.get('message', '').strip()
+        if not recipient_name or not message:
+            flash('Add their name and a personal message to create an invite.', 'warning')
+        elif len(recipient_name) > 80 or len(message) > 500:
+            flash('Keep the name under 80 characters and the message under 500.', 'warning')
+        else:
+            token = secrets.token_urlsafe(18)
+            db = get_db()
+            db.execute('''
+                INSERT INTO recruitment_invites (token, inviter_id, recipient_name, message)
+                VALUES (?, ?, ?, ?)
+            ''', (token, inviter_id, recipient_name, message))
+            db.commit()
+            generated_url = url_for('join_from_invite', token=token, _external=True)
+            flash('Personal invite link created. Share it directly with your friend.', 'success')
+
+    invites = query_db('''
+        SELECT i.*, accepted.username AS accepted_username
+        FROM recruitment_invites i
+        LEFT JOIN users accepted ON accepted.id = i.accepted_by
+        WHERE i.inviter_id = ?
+        ORDER BY i.created_at DESC
+    ''', (inviter_id,))
+    return render_template('invite.html.j2', invites=invites, generated_url=generated_url)
+
+
+@app.route('/join/<token>')
+def join_from_invite(token):
+    invitation = query_db('''
+        SELECT i.*, inviter.username AS inviter_username
+        FROM recruitment_invites i
+        JOIN users inviter ON inviter.id = i.inviter_id
+        WHERE i.token = ?
+    ''', (token,), one=True)
+    if not invitation:
+        abort(404)
+    return render_template('join_invite.html.j2', invitation=invitation)
+
+
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
+    invite_token = (request.form.get('invite_token') or request.args.get('invite', '')).strip()
+    invitation = query_db('''
+        SELECT i.token, i.recipient_name, i.message, inviter.username AS inviter_username
+        FROM recruitment_invites i
+        JOIN users inviter ON inviter.id = i.inviter_id
+        WHERE i.token = ? AND i.accepted_by IS NULL
+    ''', (invite_token,), one=True) if invite_token else None
+    if invite_token and not invitation:
+        flash('This invite link is invalid or has already been used.', 'warning')
+        invite_token = ''
+
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
@@ -600,7 +672,7 @@ def signup():
         moderated_profile, profile_score = moderate_content(profile)
         if profile_score >= 5.0 and moderated_profile.startswith('[content removed due to '):
             flash('Your profile introduction was blocked by the moderation policy.', 'danger')
-            return render_template('signup.html.j2')
+            return render_template('signup.html.j2', invitation=invitation, invite_token=invite_token)
 
         hashed_password = generate_password_hash(password)
 
@@ -611,10 +683,16 @@ def signup():
                 'INSERT INTO users (username, password, location, birthdate, profile) VALUES (?, ?, ?, ?, ?)',
                 (username, hashed_password, location, birthdate, profile)
             )
-            db.commit()
 
             # 1. Get the ID of the user we just created.
             new_user_id = cur.lastrowid
+            if invitation:
+                cur.execute('''
+                    UPDATE recruitment_invites
+                    SET accepted_by = ?, accepted_at = CURRENT_TIMESTAMP
+                    WHERE token = ? AND accepted_by IS NULL
+                ''', (new_user_id, invite_token))
+            db.commit()
 
             # 2. Add user info to the session cookie.
             session.clear() # Clear any old session data
@@ -631,7 +709,7 @@ def signup():
             cur.close()
             db.close()
             
-    return render_template('signup.html.j2')
+    return render_template('signup.html.j2', invitation=invitation, invite_token=invite_token)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -1197,9 +1275,88 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
+    positive_reactions = ('like', 'love', 'laugh', 'wow')
+    followed_ids = set()
+    interacted_post_ids = set()
+    preferred_authors = set()
+    preferred_terms = collections.Counter()
+    stop_words = {
+        'about', 'after', 'again', 'also', 'and', 'are', 'because', 'been',
+        'before', 'but', 'can', 'could', 'did', 'for', 'from', 'get', 'got',
+        'had', 'has', 'have', 'her', 'here', 'him', 'his', 'how', 'into',
+        'its', 'just', 'like', 'more', 'not', 'our', 'out', 'over', 'she',
+        'some', 'than', 'that', 'the', 'their', 'them', 'then', 'there',
+        'these', 'they', 'this', 'those', 'through', 'too', 'was', 'were',
+        'what', 'when', 'where', 'which', 'who', 'will', 'with', 'would',
+        'you', 'your'
+    }
 
-    return recommended_posts;
+    if user_id is not None:
+        followed_ids = {
+            row['followed_id']
+            for row in query_db('SELECT followed_id FROM follows WHERE follower_id = ?', (user_id,))
+        }
+        user_reactions = query_db(
+            'SELECT post_id, reaction_type FROM reactions WHERE user_id = ?',
+            (user_id,)
+        )
+        interacted_post_ids = {row['post_id'] for row in user_reactions}
+        positive_post_ids = {
+            row['post_id'] for row in user_reactions
+            if row['reaction_type'] in positive_reactions
+        }
+        if positive_post_ids:
+            placeholders = ','.join('?' for _ in positive_post_ids)
+            positive_posts = query_db(f'''
+                SELECT p.content, p.user_id
+                FROM posts p
+                WHERE p.id IN ({placeholders})
+            ''', tuple(positive_post_ids))
+            for post in positive_posts:
+                preferred_authors.add(post['user_id'])
+                terms = re.findall(r'[a-z0-9]{3,}', (post['content'] or '').lower())
+                preferred_terms.update(term for term in terms if term not in stop_words)
+
+    popularity = query_db('''
+        SELECT post_id, COUNT(*) AS positive_count
+        FROM reactions
+        WHERE reaction_type IN ('like', 'love', 'laugh', 'wow')
+        GROUP BY post_id
+    ''')
+    popularity_by_post = {row['post_id']: row['positive_count'] for row in popularity}
+    candidates = query_db('''
+        SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id
+        FROM posts p
+        JOIN users u ON u.id = p.user_id
+        ORDER BY p.created_at DESC
+    ''')
+
+    ranked_posts = []
+    for post in candidates:
+        if user_id is not None and (post['user_id'] == user_id or post['id'] in interacted_post_ids):
+            continue
+        if filter_following and post['user_id'] not in followed_ids:
+            continue
+
+        terms = set(re.findall(r'[a-z0-9]{3,}', (post['content'] or '').lower()))
+        score = sum(min(preferred_terms[term], 3) for term in terms if term not in stop_words)
+        if post['user_id'] in followed_ids:
+            score += 3.0
+        if post['user_id'] in preferred_authors:
+            score += 2.0
+        score += min(popularity_by_post.get(post['id'], 0), 5) * 0.1
+        ranked_posts.append((score, post))
+
+    best_posts = sorted(
+        ranked_posts,
+        key=lambda item: (item[0], item[1]['created_at']),
+        reverse=True
+    )[:5]
+    return sorted(
+        (post for _, post in best_posts),
+        key=lambda post: post['created_at'],
+        reverse=True
+    )
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)

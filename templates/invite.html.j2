@@ -1,0 +1,45 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="container col-lg-8 mx-auto mt-4">
+  <h1 class="h2 border-bottom pb-2">Invite someone to Mini Social</h1>
+  <p class="text-muted">Personal invitations help new members arrive through people they know.</p>
+
+  {% if generated_url %}
+  <div class="alert alert-success" role="status">
+    <label class="form-label" for="generated-invite-link">Your personal invite link</label>
+    <input class="form-control" id="generated-invite-link" value="{{ generated_url }}" readonly onclick="this.select()">
+  </div>
+  {% endif %}
+
+  <form action="{{ url_for('invite_member') }}" method="POST" class="mb-5">
+    <div class="mb-3">
+      <label class="form-label" for="recipient-name">Who are you inviting?</label>
+      <input class="form-control" id="recipient-name" name="recipient_name" maxlength="80" required>
+    </div>
+    <div class="mb-3">
+      <label class="form-label" for="invite-message">Add a personal note</label>
+      <textarea class="form-control" id="invite-message" name="message" rows="3" maxlength="500" required></textarea>
+    </div>
+    <button class="btn btn-primary" type="submit">Create personal invite link</button>
+  </form>
+
+  <h2 class="h4 border-bottom pb-2">Invitations sent</h2>
+  <div class="list-group">
+    {% for invite in invites %}
+    <div class="list-group-item d-flex justify-content-between align-items-center gap-3">
+      <div>
+        <strong>{{ invite.recipient_name }}</strong>
+        <div class="small text-muted">{{ invite.message }}</div>
+      </div>
+      {% if invite.accepted_username %}
+      <span class="badge text-bg-success">Joined as {{ invite.accepted_username }}</span>
+      {% else %}
+      <span class="badge text-bg-secondary">Pending</span>
+      {% endif %}
+    </div>
+    {% else %}
+    <p class="text-muted">You have not sent any invitations yet.</p>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

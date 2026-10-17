@@ -3,7 +3,14 @@
 <div class="container col-md-6 mx-auto mt-5">
   <div class="card p-4">
     <h2 class="mb-4 text-center">Sign Up</h2>
+    {% if invitation %}
+    <div class="alert alert-info" role="status">
+      <strong>{{ invitation.inviter_username }} invited you, {{ invitation.recipient_name }}.</strong>
+      <p class="mb-0 mt-2">{{ invitation.message }}</p>
+    </div>
+    {% endif %}
     <form method="POST">
+      <input type="hidden" name="invite_token" value="{{ invite_token or '' }}">
       <div class="mb-3">
         <label for="username" class="form-label">Username</label>
         <input type="text" class="form-control" id="username" name="username" required>
