@@ -26,6 +26,11 @@ MODERATION_CONFIG = json.loads(decrypted_data)
 TIER1_WORDS = MODERATION_CONFIG['categories']['tier1_severe_violations']['words']
 TIER2_PHRASES = MODERATION_CONFIG['categories']['tier2_spam_scams']['phrases']
 TIER3_WORDS = MODERATION_CONFIG['categories']['tier3_mild_profanity']['words']
+BLACKLIST_WORDS = ('fuck', 'kill')
+URL_PATTERN = re.compile(
+    r'\b(?:https?://|www\.)[^\s<>()]+|(?<![@\w])(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>()]*)?',
+    re.IGNORECASE
+)
 
 def get_db():
     """
@@ -377,14 +382,16 @@ def add_post():
     # Get content from the submitted form
     content = request.form.get('content')
 
-    # Pass the user's content through the moderation function
-    moderated_content = content
+    moderated_content, moderation_score = moderate_content(content)
+    if moderation_score >= 5.0 and moderated_content.startswith('[content removed due to '):
+        flash('Your post was blocked by the moderation policy.', 'danger')
+        return redirect(url_for('feed'))
 
     # Basic validation to ensure post is not empty
-    if moderated_content and moderated_content.strip():
+    if content and content.strip():
         db = get_db()
         db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
+                   (user_id, content))
         db.commit()
         flash('Your post was successfully created!', 'success')
     else:
@@ -588,6 +595,11 @@ def signup():
         birthdate = request.form.get('birthdate', '')
         profile = request.form.get('profile', '')
 
+        moderated_profile, profile_score = moderate_content(profile)
+        if profile_score >= 5.0 and moderated_profile.startswith('[content removed due to '):
+            flash('Your profile introduction was blocked by the moderation policy.', 'danger')
+            return render_template('signup.html.j2')
+
         hashed_password = generate_password_hash(password)
 
         db = get_db()
@@ -662,6 +674,11 @@ def add_comment(post_id):
 
     # Get content from the submitted form
     content = request.form.get('content')
+
+    moderated_content, moderation_score = moderate_content(content)
+    if moderation_score >= 5.0 and moderated_content.startswith('[content removed due to '):
+        flash('Your comment was blocked by the moderation policy.', 'danger')
+        return redirect(request.referrer or url_for('post_detail', post_id=post_id))
 
     # Basic validation to ensure comment is not empty
     if content and content.strip():
@@ -1055,9 +1072,35 @@ def user_risk_analysis(user_id):
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
     
-    score = 0
+    user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user:
+        return 0.0
 
-    return score;
+    profile_score = moderate_content(user['profile'] or '')[1]
+    posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
+    comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
+    average_post_score = (
+        sum(moderate_content(post['content'] or '')[1] for post in posts) / len(posts)
+        if posts else 0.0
+    )
+    average_comment_score = (
+        sum(moderate_content(comment['content'] or '')[1] for comment in comments) / len(comments)
+        if comments else 0.0
+    )
+
+    content_risk_score = profile_score + (average_post_score * 3) + average_comment_score
+    created_at = user['created_at']
+    if isinstance(created_at, str):
+        created_at = datetime.fromisoformat(created_at)
+    if created_at is not None:
+        now = datetime.now(created_at.tzinfo) if created_at.tzinfo else datetime.utcnow()
+        account_age_days = (now - created_at).total_seconds() / 86400
+        if account_age_days < 7:
+            content_risk_score *= 1.5
+        elif account_age_days < 30:
+            content_risk_score *= 1.2
+
+    return float(min(5.0, content_risk_score))
 
     
 # Assignment 2.1
@@ -1078,9 +1121,48 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
+    if content is None:
+        content = ''
+    elif not isinstance(content, str):
+        content = str(content)
+
+    severe_terms = dict.fromkeys((*TIER1_WORDS, *BLACKLIST_WORDS))
+    for word in severe_terms:
+        pattern = r'(?<!\w)' + re.escape(word) + r'(?!\w)'
+        if re.search(pattern, content, flags=re.IGNORECASE):
+            return '[content removed due to severe violation]', 5.0
+
+    for phrase in TIER2_PHRASES:
+        pattern = r'(?<!\w)' + re.escape(phrase) + r'(?!\w)'
+        if re.search(pattern, content, flags=re.IGNORECASE):
+            return '[content removed due to spam/scam policy]', 5.0
+
     moderated_content = content
-    score = 0
-    
+    score = 0.0
+    for word in TIER3_WORDS:
+        pattern = r'(?<!\w)' + re.escape(word) + r'(?!\w)'
+        moderated_content, matches = re.subn(
+            pattern,
+            lambda match: '*' * len(match.group(0)),
+            moderated_content,
+            flags=re.IGNORECASE
+        )
+        score += 2.0 * matches
+
+    def redact_url(match):
+        url = match.group(0)
+        trailing_punctuation = url[len(url.rstrip('.,!?;:')):]
+        return '[link removed]' + trailing_punctuation
+
+    moderated_content, link_count = URL_PATTERN.subn(redact_url, moderated_content)
+    score += 2.0 * link_count
+
+    alphabetic_characters = [character for character in content if character.isalpha()]
+    if len(alphabetic_characters) > 15:
+        uppercase_ratio = sum(character.isupper() for character in alphabetic_characters) / len(alphabetic_characters)
+        if uppercase_ratio > 0.7:
+            score += 0.5
+
     return moderated_content, score
 
 # Coding Assignment #3

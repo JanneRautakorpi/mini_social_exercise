@@ -20,6 +20,7 @@
                 <p>Content is checked against high-priority violation tiers. A match results in immediate content removal and a maximum score.</p>
                 <ul class="list-group list-group-flush mb-3">
                     <li class="list-group-item"><strong>Rule 1.1.1 (Tier 1 Words):</strong> A case-insensitive, whole-word search is performed against the Tier 1 Word List. If a match is found, the function immediately returns the string <code>[content removed due to severe violation]</code> and a fixed Content Score of <strong>5.0</strong>.</li>
+                    <li class="list-group-item"><strong>Additional Blacklist:</strong> The words <code>fuck</code> and <code>kill</code> are also checked case-insensitively as whole words. A match immediately removes the content and returns the severe-violation message with a Content Score of <strong>5.0</strong>.</li>
                     <li class="list-group-item"><strong>Rule 1.1.2 (Tier 2 Phrases):</strong> If no Tier 1 match is found, a case-insensitive, whole-phrase search is performed against the Tier 2 Phrase List. If a match is found, the function immediately returns the string <code>[content removed due to spam/scam policy]</code> and a fixed Content Score of <strong>5.0</strong>.</li>
                 </ul>
 
