@@ -461,6 +461,11 @@ def user_profile(username):
 
     followers_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE followed_id = ?', (user['id'],), one=True)['cnt']
     following_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?', (user['id'],), one=True)['cnt']
+    contribution_count = query_db('''
+        SELECT COUNT(*) AS cnt
+        FROM contributions
+        WHERE contributor_id = ? AND status = 'completed'
+    ''', (user['id'],), one=True)['cnt']
     capabilities = query_db('SELECT interests, skills FROM user_capabilities WHERE user_id = ?', (user['id'],), one=True)
 
     #  NEW: CHECK FOLLOW STATUS 
@@ -484,6 +489,7 @@ def user_profile(username):
                            comments=comments,
                            followers_count=followers_count, 
                            following_count=following_count,
+                           contribution_count=contribution_count,
                            is_following=is_currently_following,
                            capabilities=capabilities)
     
