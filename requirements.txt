@@ -1,2 +1,3 @@
 flask
 cryptography
+better-profanity==0.6.1

@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash, g, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
+from better_profanity import profanity
 import collections
 import json
 import sqlite3
@@ -31,6 +32,7 @@ URL_PATTERN = re.compile(
     r'\b(?:https?://|www\.)[^\s<>()]+|(?<![@\w])(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>()]*)?',
     re.IGNORECASE
 )
+profanity.load_censor_words()
 
 def get_db():
     """
@@ -1132,6 +1134,11 @@ def moderate_content(content):
         if re.search(pattern, content, flags=re.IGNORECASE):
             return '[content removed due to severe violation]', 5.0
 
+    for word in BLACKLIST_WORDS:
+        stretched_pattern = r'(?<!\w)' + ''.join(re.escape(character) + '+' for character in word) + r'(?!\w)'
+        if re.search(stretched_pattern, content, flags=re.IGNORECASE):
+            return '[content removed due to severe violation]', 5.0
+
     for phrase in TIER2_PHRASES:
         pattern = r'(?<!\w)' + re.escape(phrase) + r'(?!\w)'
         if re.search(pattern, content, flags=re.IGNORECASE):
@@ -1156,6 +1163,9 @@ def moderate_content(content):
 
     moderated_content, link_count = URL_PATTERN.subn(redact_url, moderated_content)
     score += 2.0 * link_count
+
+    if profanity.contains_profanity(moderated_content):
+        return '[content removed due to severe violation]', 5.0
 
     alphabetic_characters = [character for character in content if character.isalpha()]
     if len(alphabetic_characters) > 15:
