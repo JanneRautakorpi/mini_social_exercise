@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
@@ -39,6 +39,30 @@ def get_db():
             detect_types=sqlite3.PARSE_DECLTYPES
         )
         g.db.row_factory = sqlite3.Row
+        g.db.executescript('''
+            CREATE TABLE IF NOT EXISTS user_capabilities (
+                user_id INTEGER PRIMARY KEY,
+                interests TEXT NOT NULL DEFAULT '',
+                skills TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS contributions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                creator_id INTEGER NOT NULL,
+                assigned_to INTEGER,
+                contributor_id INTEGER,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                interest TEXT NOT NULL DEFAULT '',
+                skill TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TEXT,
+                FOREIGN KEY (creator_id) REFERENCES users(id),
+                FOREIGN KEY (assigned_to) REFERENCES users(id),
+                FOREIGN KEY (contributor_id) REFERENCES users(id)
+            );
+        ''')
 
     return g.db
 
@@ -110,6 +134,44 @@ def feed():
     offset = (page - 1) * POSTS_PER_PAGE
 
     current_user_id = session.get('user_id')
+    contributions_raw = query_db('''
+        SELECT c.*, creator.username AS creator_name,
+               assignee.username AS assignee_name,
+               contributor.username AS contributor_name
+        FROM contributions c
+        JOIN users creator ON creator.id = c.creator_id
+        LEFT JOIN users assignee ON assignee.id = c.assigned_to
+        LEFT JOIN users contributor ON contributor.id = c.contributor_id
+        WHERE c.status IN ('open', 'in_progress')
+          AND (c.assigned_to IS NULL OR c.assigned_to = ? OR c.creator_id = ?)
+        ORDER BY CASE c.status WHEN 'open' THEN 0 ELSE 1 END, c.created_at DESC
+    ''', (current_user_id or -1, current_user_id or -1))
+    contributions = [dict(contribution) for contribution in contributions_raw]
+    member_options = query_db('''
+        SELECT u.id, u.username,
+               COALESCE(c.interests, '') AS interests,
+               COALESCE(c.skills, '') AS skills
+        FROM users u
+        LEFT JOIN user_capabilities c ON c.user_id = u.id
+        WHERE u.id != ?
+        ORDER BY u.username
+    ''', (current_user_id or -1,)) if current_user_id else []
+    member_capabilities = query_db('SELECT interests, skills FROM user_capabilities WHERE user_id = ?', (current_user_id,), one=True) if current_user_id else None
+    interests = {value.strip() for value in (member_capabilities['interests'] if member_capabilities else '').lower().split(',') if value.strip()}
+    skills = {value.strip() for value in (member_capabilities['skills'] if member_capabilities else '').lower().split(',') if value.strip()}
+    for contribution in contributions:
+        wanted_interests = {value.strip() for value in contribution['interest'].lower().split(',') if value.strip()}
+        wanted_skills = {value.strip() for value in contribution['skill'].lower().split(',') if value.strip()}
+        contribution['match_score'] = len(interests & wanted_interests) + len(skills & wanted_skills)
+    contributions.sort(key=lambda task: (task['status'] != 'open', -task['match_score']))
+    if current_user_id:
+        contribution_stats = query_db('''
+            SELECT SUM(CASE WHEN contributor_id = ? AND status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                   SUM(CASE WHEN contributor_id = ? AND status = 'in_progress' THEN 1 ELSE 0 END) AS active
+            FROM contributions
+        ''', (current_user_id, current_user_id), one=True)
+    else:
+        contribution_stats = None
     params = []
 
     #  2. Build the Query 
@@ -198,8 +260,94 @@ def feed():
                            current_show=show,
                            page=page, # Pass current page number
                            per_page=POSTS_PER_PAGE, # Pass items per page
+                           contributions=contributions,
+                           member_options=member_options,
+                           contribution_stats=contribution_stats,
                            reaction_emojis=REACTION_EMOJIS,
                            reaction_types=REACTION_TYPES)
+
+
+@app.route('/contributions', methods=['POST'])
+def create_contribution():
+    creator_id = session.get('user_id')
+    if not creator_id:
+        flash('Log in to ask the community for help.', 'warning')
+        return redirect(url_for('login'))
+
+    title = request.form.get('title', '').strip()
+    description = request.form.get('description', '').strip()
+    interest = request.form.get('interest', '').strip()
+    skill = request.form.get('skill', '').strip()
+    assigned_to = request.form.get('assigned_to', '').strip()
+    if not title:
+        flash('Add a short title for the contribution needed.', 'warning')
+        return redirect(url_for('feed'))
+
+    if assigned_to:
+        assignee = query_db('SELECT id FROM users WHERE id = ?', (assigned_to,), one=True)
+        if not assignee or int(assigned_to) == creator_id:
+            flash('Choose another existing member for a targeted ask.', 'warning')
+            return redirect(url_for('feed'))
+        assigned_to = assignee['id']
+    else:
+        assigned_to = None
+
+    db = get_db()
+    db.execute('''
+        INSERT INTO contributions (creator_id, assigned_to, title, description, interest, skill)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (creator_id, assigned_to, title, description, interest, skill))
+    db.commit()
+    flash('Contribution request posted.', 'success')
+    return redirect(url_for('feed'))
+
+
+@app.route('/contributions/<int:contribution_id>/claim', methods=['POST'])
+def claim_contribution(contribution_id):
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    db = get_db()
+    result = db.execute('''
+        UPDATE contributions SET contributor_id = ?, status = 'in_progress'
+        WHERE id = ? AND status = 'open' AND creator_id != ?
+          AND (assigned_to IS NULL OR assigned_to = ?)
+    ''', (user_id, contribution_id, user_id, user_id))
+    db.commit()
+    flash('You have taken on this contribution.' if result.rowcount else 'This request is no longer available to you.', 'success' if result.rowcount else 'warning')
+    return redirect(url_for('feed'))
+
+
+@app.route('/contributions/<int:contribution_id>/complete', methods=['POST'])
+def complete_contribution(contribution_id):
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    db = get_db()
+    result = db.execute('''
+        UPDATE contributions SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND contributor_id = ? AND status = 'in_progress'
+    ''', (contribution_id, user_id))
+    db.commit()
+    flash('Contribution marked complete.' if result.rowcount else 'Only the member working on this request can complete it.', 'success' if result.rowcount else 'warning')
+    return redirect(url_for('feed'))
+
+
+@app.route('/contributions/preferences', methods=['POST'])
+def update_contribution_preferences():
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    interests = request.form.get('interests', '').strip()
+    skills = request.form.get('skills', '').strip()
+    db = get_db()
+    db.execute('''
+        INSERT INTO user_capabilities (user_id, interests, skills) VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET interests = excluded.interests, skills = excluded.skills
+    ''', (user_id, interests, skills))
+    db.commit()
+    flash('Your interests and skills were updated.', 'success')
+    return redirect(url_for('user_profile', username=session.get('username')))
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -298,6 +446,7 @@ def user_profile(username):
 
     followers_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE followed_id = ?', (user['id'],), one=True)['cnt']
     following_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?', (user['id'],), one=True)['cnt']
+    capabilities = query_db('SELECT interests, skills FROM user_capabilities WHERE user_id = ?', (user['id'],), one=True)
 
     #  NEW: CHECK FOLLOW STATUS 
     is_currently_following = False # Default to False
@@ -320,7 +469,8 @@ def user_profile(username):
                            comments=comments,
                            followers_count=followers_count, 
                            following_count=following_count,
-                           is_following=is_currently_following)
+                           is_following=is_currently_following,
+                           capabilities=capabilities)
     
 
 @app.route('/u/<username>/followers')

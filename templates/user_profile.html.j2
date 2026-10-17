@@ -17,6 +17,21 @@
           </p>
           <p class="card-text">{{ user.profile or "No profile information provided." }}</p>
 
+          {% if session.get('user_id') == user.id %}
+          <form action="{{ url_for('update_contribution_preferences') }}" method="POST" class="border-top pt-3 mt-3">
+            <h3 class="h5">Contribution interests and skills</h3>
+            <div class="mb-2">
+              <label class="form-label" for="member-interests">Interests</label>
+              <input class="form-control" id="member-interests" name="interests" value="{{ capabilities.interests if capabilities else '' }}" placeholder="e.g. gardening, local events">
+            </div>
+            <div class="mb-2">
+              <label class="form-label" for="member-skills">Skills you can offer</label>
+              <input class="form-control" id="member-skills" name="skills" value="{{ capabilities.skills if capabilities else '' }}" placeholder="e.g. writing, photography">
+            </div>
+            <button type="submit" class="btn btn-outline-primary btn-sm">Save contribution profile</button>
+          </form>
+          {% endif %}
+
          {% if session.user_id and session.user_id != user.id %}
             <div class="my-3">
               {# The logic is now a simple boolean check #}

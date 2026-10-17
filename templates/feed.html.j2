@@ -22,6 +22,92 @@
 </div>
 {% endif %}
 
+<section class="col-md-8 mx-auto mb-5" aria-labelledby="contributions-heading">
+  <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-3">
+    <h2 class="mb-0" id="contributions-heading">Work needing help</h2>
+    {% if contribution_stats %}
+    <span class="text-muted small">{{ contribution_stats.completed or 0 }} completed · {{ contribution_stats.active or 0 }} in progress</span>
+    {% endif %}
+  </div>
+
+  {% if session.get('user_id') %}
+  <div class="card mb-3">
+    <div class="card-body">
+      <h3 class="h5">Ask for a contribution</h3>
+      <form action="{{ url_for('create_contribution') }}" method="POST">
+        <div class="mb-2">
+          <label class="form-label" for="contribution-title">What needs doing?</label>
+          <input class="form-control" id="contribution-title" name="title" maxlength="120" required>
+        </div>
+        <div class="mb-2">
+          <label class="form-label" for="contribution-description">Details</label>
+          <textarea class="form-control" id="contribution-description" name="description" rows="2"></textarea>
+        </div>
+        <div class="row g-2">
+          <div class="col-md-6">
+            <label class="form-label" for="contribution-interest">Interest match</label>
+            <input class="form-control" id="contribution-interest" name="interest" placeholder="e.g. gardening, events">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label" for="contribution-skill">Skills needed</label>
+            <input class="form-control" id="contribution-skill" name="skill" placeholder="e.g. writing, photography">
+          </div>
+        </div>
+        <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mt-3">
+          <div>
+            <label class="form-label" for="contribution-assignee">Ask a specific member</label>
+            <select class="form-select" id="contribution-assignee" name="assigned_to">
+              <option value="">Open request for the community</option>
+              {% for member in member_options %}
+              <option value="{{ member.id }}">{{ member.username }}{% if member.interests %} · Interests: {{ member.interests }}{% endif %}{% if member.skills %} · Skills: {{ member.skills }}{% endif %}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <button type="submit" class="btn btn-primary">Post request</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="list-group">
+    {% for task in contributions %}
+    <article class="list-group-item py-3">
+      <div class="d-flex flex-wrap justify-content-between gap-2">
+        <div>
+          <h3 class="h5 mb-1">{{ task.title }}</h3>
+          <p class="mb-2">{{ task.description }}</p>
+          <small class="text-muted">
+            Asked by {{ task.creator_name }}
+            {% if task.assignee_name %} · Requested from {{ task.assignee_name }}{% endif %}
+            {% if task.contributor_name %} · Being done by {{ task.contributor_name }}{% endif %}
+          </small>
+          <div class="small mt-1">
+            {% if task.interest %}<span class="me-2">Interest: {{ task.interest }}</span>{% endif %}
+            {% if task.skill %}<span>Skill: {{ task.skill }}</span>{% endif %}
+            {% if task.match_score > 0 %}<span class="badge text-bg-success ms-2">Matches your profile</span>{% endif %}
+          </div>
+        </div>
+        <div class="text-end">
+          <span class="badge {% if task.status == 'open' %}text-bg-primary{% else %}text-bg-warning{% endif %}">{{ task.status|replace('_', ' ')|title }}</span>
+          {% if session.get('user_id') and task.status == 'open' and task.creator_id != session.get('user_id') and (not task.assigned_to or task.assigned_to == session.get('user_id')) %}
+          <form action="{{ url_for('claim_contribution', contribution_id=task.id) }}" method="POST" class="mt-2">
+            <button type="submit" class="btn btn-sm btn-outline-primary">Take this on</button>
+          </form>
+          {% elif session.get('user_id') == task.contributor_id and task.status == 'in_progress' %}
+          <form action="{{ url_for('complete_contribution', contribution_id=task.id) }}" method="POST" class="mt-2">
+            <button type="submit" class="btn btn-sm btn-success">Mark complete</button>
+          </form>
+          {% endif %}
+        </div>
+      </div>
+    </article>
+    {% else %}
+    <p class="text-muted">No outstanding contribution requests.</p>
+    {% endfor %}
+  </div>
+</section>
+
 <h2 class="text-center border-bottom pb-2 mb-4"><span>Posts</span></h2>
 
 <div class="mb-4 text-center">
