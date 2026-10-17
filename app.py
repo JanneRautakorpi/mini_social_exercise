@@ -33,6 +33,7 @@ URL_PATTERN = re.compile(
     r'\b(?:https?://|www\.)[^\s<>()]+|(?<![@\w])(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>()]*)?',
     re.IGNORECASE
 )
+# Load the bundled word list once so moderation never needs a runtime download.
 profanity.load_censor_words()
 
 def get_db():
@@ -47,6 +48,7 @@ def get_db():
             detect_types=sqlite3.PARSE_DECLTYPES
         )
         g.db.row_factory = sqlite3.Row
+        # Create feature tables lazily so existing databases gain these features without a manual migration.
         g.db.executescript('''
             CREATE TABLE IF NOT EXISTS user_capabilities (
                 user_id INTEGER PRIMARY KEY,
@@ -153,6 +155,7 @@ def feed():
     offset = (page - 1) * POSTS_PER_PAGE
 
     current_user_id = session.get('user_id')
+    # Targeted requests stay visible only to their requester and intended member.
     contributions_raw = query_db('''
         SELECT c.*, creator.username AS creator_name,
                assignee.username AS assignee_name,
@@ -178,10 +181,12 @@ def feed():
     member_capabilities = query_db('SELECT interests, skills FROM user_capabilities WHERE user_id = ?', (current_user_id,), one=True) if current_user_id else None
     interests = {value.strip() for value in (member_capabilities['interests'] if member_capabilities else '').lower().split(',') if value.strip()}
     skills = {value.strip() for value in (member_capabilities['skills'] if member_capabilities else '').lower().split(',') if value.strip()}
+    # Exact keyword overlap makes suitable requests easier to find without assigning work automatically.
     for contribution in contributions:
         wanted_interests = {value.strip() for value in contribution['interest'].lower().split(',') if value.strip()}
         wanted_skills = {value.strip() for value in contribution['skill'].lower().split(',') if value.strip()}
         contribution['match_score'] = len(interests & wanted_interests) + len(skills & wanted_skills)
+    # Keep open requests ahead of active work, with the best member matches first in each group.
     contributions.sort(key=lambda task: (task['status'] != 'open', -task['match_score']))
     if current_user_id:
         contribution_stats = query_db('''
@@ -288,6 +293,7 @@ def feed():
 
 @app.route('/contributions', methods=['POST'])
 def create_contribution():
+    """Create public work or a request visible only to its selected member and requester."""
     creator_id = session.get('user_id')
     if not creator_id:
         flash('Log in to ask the community for help.', 'warning')
@@ -323,6 +329,7 @@ def create_contribution():
 
 @app.route('/contributions/<int:contribution_id>/claim', methods=['POST'])
 def claim_contribution(contribution_id):
+    """Let an eligible member claim an open request; the conditional update prevents double claims."""
     user_id = session.get('user_id')
     if not user_id:
         return redirect(url_for('login'))
@@ -339,6 +346,7 @@ def claim_contribution(contribution_id):
 
 @app.route('/contributions/<int:contribution_id>/complete', methods=['POST'])
 def complete_contribution(contribution_id):
+    """Only the member who claimed the request may mark it complete."""
     user_id = session.get('user_id')
     if not user_id:
         return redirect(url_for('login'))
@@ -354,6 +362,7 @@ def complete_contribution(contribution_id):
 
 @app.route('/contributions/<int:contribution_id>/obsolete', methods=['POST'])
 def obsolete_contribution(contribution_id):
+    """Let the requester retire active work without deleting its history."""
     user_id = session.get('user_id')
     if not user_id:
         return redirect(url_for('login'))
@@ -369,6 +378,7 @@ def obsolete_contribution(contribution_id):
 
 @app.route('/contributions/preferences', methods=['POST'])
 def update_contribution_preferences():
+    """Save the member's comma-separated interests and skills used for request matching."""
     user_id = session.get('user_id')
     if not user_id:
         return redirect(url_for('login'))
@@ -396,6 +406,7 @@ def add_post():
     # Get content from the submitted form
     content = request.form.get('content')
 
+    # Reject severe content before persistence; lower-severity content remains available for scoring and display filtering.
     moderated_content, moderation_score = moderate_content(content)
     if moderation_score >= 5.0 and moderated_content.startswith('[content removed due to '):
         flash('Your post was blocked by the moderation policy.', 'danger')
@@ -482,6 +493,7 @@ def user_profile(username):
 
     followers_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE followed_id = ?', (user['id'],), one=True)['cnt']
     following_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?', (user['id'],), one=True)['cnt']
+    # Count completed tasks credited to this member, not requests they created or claimed but did not finish.
     contribution_count = query_db('''
         SELECT COUNT(*) AS cnt
         FROM contributions
@@ -602,6 +614,7 @@ def privacy():
 
 @app.route('/invite', methods=['GET', 'POST'])
 def invite_member():
+    """Create personal invite links and show whether each referred member has joined."""
     inviter_id = session.get('user_id')
     if not inviter_id:
         flash('Log in to invite someone to the community.', 'warning')
@@ -616,6 +629,7 @@ def invite_member():
         elif len(recipient_name) > 80 or len(message) > 500:
             flash('Keep the name under 80 characters and the message under 500.', 'warning')
         else:
+            # Use an unguessable token so the invite can be shared privately with its intended recipient.
             token = secrets.token_urlsafe(18)
             db = get_db()
             db.execute('''
@@ -638,6 +652,7 @@ def invite_member():
 
 @app.route('/join/<token>')
 def join_from_invite(token):
+    """Show the personal message and inviter before signup; unknown tokens are not valid invitations."""
     invitation = query_db('''
         SELECT i.*, inviter.username AS inviter_username
         FROM recruitment_invites i
@@ -651,6 +666,7 @@ def join_from_invite(token):
 
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
+    """Create the account and, when signup came from a valid invite, record its referral."""
     invite_token = (request.form.get('invite_token') or request.args.get('invite', '')).strip()
     invitation = query_db('''
         SELECT i.token, i.recipient_name, i.message, inviter.username AS inviter_username
@@ -687,6 +703,7 @@ def signup():
             # 1. Get the ID of the user we just created.
             new_user_id = cur.lastrowid
             if invitation:
+                # Record attribution in the same transaction as account creation; an invite is accepted once.
                 cur.execute('''
                     UPDATE recruitment_invites
                     SET accepted_by = ?, accepted_at = CURRENT_TIMESTAMP
@@ -755,6 +772,7 @@ def add_comment(post_id):
     # Get content from the submitted form
     content = request.form.get('content')
 
+    # Apply the same severe-content prescreen used for posts before storing a comment.
     moderated_content, moderation_score = moderate_content(content)
     if moderation_score >= 5.0 and moderated_content.startswith('[content removed due to '):
         flash('Your comment was blocked by the moderation policy.', 'danger')
@@ -1139,18 +1157,7 @@ def loop_color(user_id):
 
 # Assignment 2.2
 def user_risk_analysis(user_id):
-    """
-    Args:
-        user_id: The ID of the user on which we perform risk analysis.
-
-    Returns:
-        A float number score showing the risk associated with this user. There are no strict rules or bounds to this score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk. (An upper bound of 5.0 is applied to this score elsewhere in the codebase) 
-        
-        You will be able to check the scores by logging in with the administrator account:
-            username: admin
-            password: admin
-        Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
-    """
+    """Score profile + 3x average post + average comment, apply account-age multiplier, then cap at 5."""
     
     user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
     if not user:
@@ -1168,6 +1175,7 @@ def user_risk_analysis(user_id):
         if comments else 0.0
     )
 
+    # Posts carry triple weight; profile and comment scores each contribute once.
     content_risk_score = profile_score + (average_post_score * 3) + average_comment_score
     created_at = user['created_at']
     if isinstance(created_at, str):
@@ -1175,6 +1183,7 @@ def user_risk_analysis(user_id):
     if created_at is not None:
         now = datetime.now(created_at.tzinfo) if created_at.tzinfo else datetime.utcnow()
         account_age_days = (now - created_at).total_seconds() / 86400
+        # Apply only the strongest matching age multiplier, then cap the final user score.
         if account_age_days < 7:
             content_risk_score *= 1.5
         elif account_age_days < 30:
@@ -1206,12 +1215,14 @@ def moderate_content(content):
     elif not isinstance(content, str):
         content = str(content)
 
+    # Check severe terms first so they remove the entire message and short-circuit lower-tier scoring.
     severe_terms = dict.fromkeys((*TIER1_WORDS, *BLACKLIST_WORDS))
     for word in severe_terms:
         pattern = r'(?<!\w)' + re.escape(word) + r'(?!\w)'
         if re.search(pattern, content, flags=re.IGNORECASE):
             return '[content removed due to severe violation]', 5.0
 
+    # The assignment blacklist also catches repeated-letter variants such as "kiiiill".
     for word in BLACKLIST_WORDS:
         stretched_pattern = r'(?<!\w)' + ''.join(re.escape(character) + '+' for character in word) + r'(?!\w)'
         if re.search(stretched_pattern, content, flags=re.IGNORECASE):
@@ -1222,6 +1233,7 @@ def moderate_content(content):
         if re.search(pattern, content, flags=re.IGNORECASE):
             return '[content removed due to spam/scam policy]', 5.0
 
+    # Tier 3 terms are masked before the bundled list runs, preserving their specified +2 score.
     moderated_content = content
     score = 0.0
     for word in TIER3_WORDS:
@@ -1236,17 +1248,20 @@ def moderate_content(content):
 
     def redact_url(match):
         url = match.group(0)
+        # Keep sentence punctuation that follows a URL instead of swallowing it with the link.
         trailing_punctuation = url[len(url.rstrip('.,!?;:')):]
         return '[link removed]' + trailing_punctuation
 
     moderated_content, link_count = URL_PATTERN.subn(redact_url, moderated_content)
     score += 2.0 * link_count
 
+    # Catch additional bundled-list terms and common altered spellings not covered by configured tiers.
     if profanity.contains_profanity(moderated_content):
         return '[content removed due to severe violation]', 5.0
 
     alphabetic_characters = [character for character in content if character.isalpha()]
     if len(alphabetic_characters) > 15:
+        # Capitalization is scored only when the text is long enough and mostly uppercase.
         uppercase_ratio = sum(character.isupper() for character in alphabetic_characters) / len(alphabetic_characters)
         if uppercase_ratio > 0.7:
             score += 0.5
@@ -1256,23 +1271,13 @@ def moderate_content(content):
 # Coding Assignment #3
 # Assignment 3.1
 def recommend(user_id, filter_following):
-    """
-    Args:
-        user_id: The ID of the current user.
-        filter_following: Boolean, True if we only want to see recommendations from followed users.
+    """Rank unseen posts using positive-reaction topics, followed authors, and engagement.
 
-    Returns:
-        A list of 5 recommended posts, in reverse-chronological order.
+    Followed-only mode restricts candidates to followed authors. Returns up to five rows,
+    presented newest first after relevance selects them.
 
-    To test whether your recommendation algorithm works, let's pretend we like the DIY topic. Here are some users that often post DIY comment and a few example posts. Make sure your account did not engage with anything else. You should test your algorithm with these and see if your recommendation algorithm picks up on your interest in DIY and starts showing related content.
-    
-    Users: @starboy99, @DancingDolphin, @blogger_bob
-    Posts: 1810, 1875, 1880, 2113
-    
-    Materials: 
-    - https://www.nvidia.com/en-us/glossary/recommendation-system/
-    - http://www.configworks.com/mz/handout_recsys_sac2010.pdf
-    - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
+    For the assignment example, positively react to posts 1810, 1875, 1880, or
+    2113 by starboy99, DancingDolphin, or blogger_bob and check for related posts.
     """
 
     positive_reactions = ('like', 'love', 'laugh', 'wow')
@@ -1301,6 +1306,7 @@ def recommend(user_id, filter_following):
             (user_id,)
         )
         interacted_post_ids = {row['post_id'] for row in user_reactions}
+        # Positive reactions teach both topic and author preferences; all reactions exclude repeats.
         positive_post_ids = {
             row['post_id'] for row in user_reactions
             if row['reaction_type'] in positive_reactions
@@ -1331,6 +1337,7 @@ def recommend(user_id, filter_following):
         ORDER BY p.created_at DESC
     ''')
 
+    # Topic overlap is primary; followed authors add 3, liked authors 2, and popularity at most 0.5.
     ranked_posts = []
     for post in candidates:
         if user_id is not None and (post['user_id'] == user_id or post['id'] in interacted_post_ids):
@@ -1347,6 +1354,7 @@ def recommend(user_id, filter_following):
         score += min(popularity_by_post.get(post['id'], 0), 5) * 0.1
         ranked_posts.append((score, post))
 
+    # Select by relevance first, then restore the feed's expected newest-first presentation order.
     best_posts = sorted(
         ranked_posts,
         key=lambda item: (item[0], item[1]['created_at']),
